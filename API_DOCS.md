@@ -474,7 +474,90 @@ Same request body as analyze (without `save_to_project`).
 
 ---
 
-### Code Summarization (Fine-tuned CodeT5)
+### Agentic Pipeline (Multi-Agent Documentation)
+
+The agentic pipeline runs 4 specialized AI agents in sequence to produce high-quality documentation. Each agent's work is captured in a trace that shows exactly what happened at each step.
+
+#### Run Agent Pipeline
+
+```
+POST /api/v1/agent/run
+Content-Type: application/json
+```
+
+Runs the full multi-agent pipeline on provided Python files and returns the complete trace.
+
+**Request:**
+```json
+{
+  "files": [
+    {"filename": "main.py", "content": "def hello():\n    return 'world'"},
+    {"filename": "models.py", "content": "class User:\n    pass"}
+  ]
+}
+```
+
+**Response:**
+```json
+{
+  "documentation": "# Project Overview\n...",
+  "trace": {
+    "steps": [
+      {
+        "step_number": 1,
+        "agent_name": "Planner",
+        "role": "Analyzes the project structure and creates a documentation plan",
+        "input_preview": "You are a Documentation Planner agent...",
+        "output": "1. PROJECT SUMMARY: This project...\n2. KEY TOPICS:...",
+        "duration_seconds": 2.34
+      },
+      {
+        "step_number": 2,
+        "agent_name": "Analyzer",
+        "role": "Deep-dives into the code to understand what each component does",
+        "input_preview": "You are a Code Analyzer agent...",
+        "output": "## Analysis\n### hello()\nPURPOSE: ...",
+        "duration_seconds": 3.12
+      },
+      {
+        "step_number": 3,
+        "agent_name": "Writer",
+        "role": "Writes polished Markdown documentation from the plan and analysis",
+        "input_preview": "You are a Technical Writer agent...",
+        "output": "# Project Overview\n...",
+        "duration_seconds": 4.56
+      },
+      {
+        "step_number": 4,
+        "agent_name": "Reviewer",
+        "role": "Reviews generated documentation for accuracy, completeness, and quality",
+        "input_preview": "You are a Documentation Reviewer agent...",
+        "output": "ACCURACY SCORE: 8/10\nCOMPLETENESS SCORE: 7/10\n...",
+        "duration_seconds": 2.89
+      },
+      {
+        "step_number": 5,
+        "agent_name": "FinalWriter",
+        "role": "Produces the final documentation after incorporating review feedback",
+        "input_preview": "You are a Technical Writer agent...",
+        "output": "# Project Overview\n(improved version)...",
+        "duration_seconds": 4.21
+      }
+    ],
+    "total_duration_seconds": 17.12,
+    "final_output": "# Project Overview\n(improved version)..."
+  }
+}
+```
+
+**Notes:**
+- The trace shows exactly what each agent did — useful for FYP defense presentations
+- The `/docs-text` endpoint also uses the agent pipeline by default (set `use_agents: false` to disable)
+- Falls back to single-prompt generation if agents encounter errors
+
+---
+
+### Code Summarization (CodeT5, Optional)
 
 These endpoints use a fine-tuned CodeT5-small model trained on Python code summarization. They require `HUGGINGFACE_API_TOKEN` and optionally `HUGGINGFACE_MODEL_ID` to be configured on the server.
 

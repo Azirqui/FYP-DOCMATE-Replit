@@ -18,6 +18,8 @@ from .github import get_user_repos, get_repo_python_files
 from ..llm import LLMFactory
 from . import supabase_service
 
+from ..agents.engine import AgentEngine
+
 from .schemas import (
     UMLResponse,
     RelationshipResponse,
@@ -41,6 +43,10 @@ from .schemas import (
     SummarizeResponse,
     BatchSummarizeRequest,
     BatchSummarizeResponse,
+    AgentRunRequest,
+    AgentRunResponse,
+    AgentTraceResponse,
+    AgentStepResponse,
 )
 
 router = APIRouter()
@@ -108,46 +114,98 @@ async def health_check():
     )
 
 
-def _get_codet5_summaries(analyses, project_path: Path) -> dict[str, dict[str, str]]:
-    codet5 = LLMFactory.get_codet5()
-    if not codet5:
-        return {}
+def _trace_to_response(trace) -> AgentTraceResponse:
+    return AgentTraceResponse(
+        steps=[
+            AgentStepResponse(
+                step_number=s.step_number,
+                agent_name=s.agent_name,
+                role=s.role,
+                input_preview=s.input_preview[:500],
+                output=s.output,
+                duration_seconds=round(s.duration_seconds, 2),
+            )
+            for s in trace.steps
+        ],
+        total_duration_seconds=round(trace.total_duration_seconds, 2),
+        final_output=trace.final_output,
+    )
 
-    summaries: dict[str, dict[str, str]] = {}
+
+def _build_project_outline(analyses, project_path: Path) -> str:
+    outline_lines = []
     for analysis in analyses:
         rel_path = str(analysis.path.relative_to(project_path))
-        file_summaries: dict[str, str] = {}
+        outline_lines.append(f"\nFile: {rel_path}")
+        if analysis.classes:
+            for cls in analysis.classes:
+                outline_lines.append(f"  Class: {cls.name}")
+                for m in cls.methods:
+                    outline_lines.append(f"    Method: {m.name}")
+        if analysis.functions:
+            for fn in analysis.functions:
+                outline_lines.append(f"  Function: {fn.name}")
+    return "\n".join(outline_lines)
 
+
+def _collect_code_excerpts(analyses, project_path: Path) -> dict[str, str]:
+    excerpts = {}
+    for analysis in analyses:
+        rel_path = str(analysis.path.relative_to(project_path))
+        try:
+            source = analysis.path.read_text(encoding="utf-8")
+            excerpts[rel_path] = "\n".join(source.splitlines()[:120])
+        except Exception:
+            pass
+    return excerpts
+
+
+def _build_project_overview_agentic(analyses, project_path, metrics, uml_diagrams, provider):
+    outline = _build_project_outline(analyses, project_path)
+    metrics_str = "\n".join([f"- {k}: {v}" for k, v in metrics.items()])
+    class_diagram = uml_diagrams.get("class_diagram", "")
+    code_excerpts = _collect_code_excerpts(analyses, project_path)
+
+    engine = AgentEngine(provider)
+    trace = engine.run_doc_pipeline(
+        project_outline=outline,
+        metrics_str=metrics_str,
+        code_excerpts=code_excerpts,
+        class_diagram=class_diagram,
+    )
+    return trace.final_output, trace
+
+
+def _build_module_doc_agentic(analysis, project_path, provider):
+    rel_path = str(analysis.path.relative_to(project_path))
+    short_name = analysis.path.stem
+
+    outline_lines = [f"File: {rel_path}"]
+    if analysis.classes:
+        outline_lines.append("Classes:")
         for cls in analysis.classes:
-            try:
-                source = analysis.path.read_text(encoding="utf-8")
-                lines = source.splitlines()
-                start = max(0, cls.lineno - 1)
-                end = min(len(lines), cls.end_lineno)
-                code_snippet = "\n".join(lines[start:end])
-                summary = codet5.generate(f"summarize python: {code_snippet}")
-                if summary:
-                    file_summaries[f"class:{cls.name}"] = summary
-            except Exception:
-                pass
-
+            outline_lines.append(f"  - {cls.name}")
+            for m in cls.methods:
+                outline_lines.append(f"    * {m.name}")
+    if analysis.functions:
+        outline_lines.append("Functions:")
         for fn in analysis.functions:
-            try:
-                source = analysis.path.read_text(encoding="utf-8")
-                lines = source.splitlines()
-                start = max(0, fn.lineno - 1)
-                end = min(len(lines), fn.end_lineno)
-                code_snippet = "\n".join(lines[start:end])
-                summary = codet5.generate(f"summarize python: {code_snippet}")
-                if summary:
-                    file_summaries[f"function:{fn.name}"] = summary
-            except Exception:
-                pass
+            outline_lines.append(f"  - {fn.name}")
+    outline = "\n".join(outline_lines)
 
-        if file_summaries:
-            summaries[rel_path] = file_summaries
+    try:
+        source = analysis.path.read_text(encoding="utf-8")
+        code_excerpt = "\n".join(source.splitlines()[:120])
+    except Exception:
+        code_excerpt = ""
 
-    return summaries
+    engine = AgentEngine(provider)
+    trace = engine.run_module_pipeline(
+        file_path=rel_path,
+        code_excerpt=code_excerpt,
+        outline=outline,
+    )
+    return trace.final_output, trace
 
 
 @router.post("/docstring", response_model=DocstringResponse, tags=["Docstring"])
@@ -289,7 +347,7 @@ Keep it concise, accurate, and helpful to a new developer joining the project.""
 """
 
 
-def _build_module_doc(analysis, project_path, provider, codet5_summaries: Optional[dict] = None) -> str:
+def _build_module_doc(analysis, project_path, provider) -> str:
     rel_path = analysis.path.relative_to(project_path)
     short_name = rel_path.stem
 
@@ -306,27 +364,9 @@ def _build_module_doc(analysis, project_path, provider, codet5_summaries: Option
             outline_lines.append(f"  - {fn.name}")
     outline = "\n".join(outline_lines)
 
-    model_summaries_section = ""
-    file_key = str(rel_path)
-    if codet5_summaries and file_key in codet5_summaries:
-        summary_lines = ["AI Model Summaries (generated by fine-tuned CodeT5):"]
-        for entity, summary in codet5_summaries[file_key].items():
-            summary_lines.append(f"  - {entity}: {summary}")
-        model_summaries_section = "\n".join(summary_lines)
-
     if provider:
         source = analysis.path.read_text(encoding="utf-8")
         excerpt = "\n".join(source.splitlines()[:120])
-
-        summaries_context = ""
-        if model_summaries_section:
-            summaries_context = f"""
-
-{model_summaries_section}
-
-Use these AI-generated summaries as additional context. They were generated by a fine-tuned
-code summarization model trained specifically on Python code. Incorporate their insights
-into your documentation but write in your own style."""
 
         prompt = f"""You are an expert software engineer and technical writer.
 
@@ -335,7 +375,7 @@ You are given information about a single Python module.
 File path: {rel_path}
 
 High-level outline of its contents:
-{outline}{summaries_context}
+{outline}
 
 Code excerpt (may be truncated):
 ```python
@@ -611,15 +651,30 @@ async def generate_docs_text_endpoint(
             uml_diagrams["dependency_graph"] = generate_dependency_graph(analyses, temp_path)
             uml_diagrams["inheritance_diagram"] = generate_inheritance_diagram(analyses, temp_path)
 
-        project_overview = _build_project_overview(analyses, temp_path, metrics, uml_diagrams, provider)
-
-        codet5_summaries = _get_codet5_summaries(analyses, temp_path)
+        agent_trace = None
+        if request.use_agents and provider:
+            try:
+                project_overview, trace = _build_project_overview_agentic(
+                    analyses, temp_path, metrics, uml_diagrams, provider
+                )
+                agent_trace = _trace_to_response(trace)
+            except Exception:
+                project_overview = _build_project_overview(analyses, temp_path, metrics, uml_diagrams, provider)
+        else:
+            project_overview = _build_project_overview(analyses, temp_path, metrics, uml_diagrams, provider)
 
         module_docs = {}
         if request.include_module_docs:
             for analysis in analyses:
                 rel_path = str(analysis.path.relative_to(temp_path))
-                module_docs[rel_path] = _build_module_doc(analysis, temp_path, provider, codet5_summaries)
+                if request.use_agents and provider:
+                    try:
+                        doc, _ = _build_module_doc_agentic(analysis, temp_path, provider)
+                        module_docs[rel_path] = doc
+                    except Exception:
+                        module_docs[rel_path] = _build_module_doc(analysis, temp_path, provider)
+                else:
+                    module_docs[rel_path] = _build_module_doc(analysis, temp_path, provider)
 
         await log_usage(user_id, "docs-text", len(py_files))
 
@@ -628,6 +683,7 @@ async def generate_docs_text_endpoint(
             module_docs=module_docs,
             uml_diagrams=uml_diagrams,
             metrics=metrics,
+            agent_trace=agent_trace,
         )
 
 
@@ -749,14 +805,22 @@ async def export_pdf_endpoint(
             module_docs = None
 
             if provider:
-                documentation = _build_project_overview(analyses, temp_path, metrics, uml_data or {}, provider)
+                try:
+                    documentation, _ = _build_project_overview_agentic(
+                        analyses, temp_path, metrics, uml_data or {}, provider
+                    )
+                except Exception:
+                    documentation = _build_project_overview(analyses, temp_path, metrics, uml_data or {}, provider)
 
-                codet5_summaries = _get_codet5_summaries(analyses, temp_path)
                 if request.include_module_docs:
                     module_docs = {}
                     for analysis in analyses:
                         rel_path = str(analysis.path.relative_to(temp_path))
-                        module_docs[rel_path] = _build_module_doc(analysis, temp_path, provider, codet5_summaries)
+                        try:
+                            doc, _ = _build_module_doc_agentic(analysis, temp_path, provider)
+                            module_docs[rel_path] = doc
+                        except Exception:
+                            module_docs[rel_path] = _build_module_doc(analysis, temp_path, provider)
 
             rel_data = [
                 {"from_entity": r.from_class, "to_entity": r.to_class,
@@ -886,18 +950,31 @@ async def analyze_github_repo(
                 "dependency_graph": uml_diagrams.get("dependency", ""),
                 "inheritance_diagram": uml_diagrams.get("inheritance", ""),
             }
-            documentation = _build_project_overview(analyses, temp_path, metrics, uml_for_overview, provider)
+            if provider:
+                try:
+                    documentation, _ = _build_project_overview_agentic(
+                        analyses, temp_path, metrics, uml_for_overview, provider
+                    )
+                except Exception:
+                    documentation = _build_project_overview(analyses, temp_path, metrics, uml_for_overview, provider)
+            else:
+                documentation = _build_project_overview(analyses, temp_path, metrics, uml_for_overview, provider)
             docs_to_save.append({
                 "doc_type": "overview",
                 "module_name": None,
                 "content": documentation,
             })
 
-            codet5_summaries = _get_codet5_summaries(analyses, temp_path)
             if request.include_module_docs:
                 for analysis in analyses:
                     rel_path = str(analysis.path.relative_to(temp_path))
-                    module_doc = _build_module_doc(analysis, temp_path, provider, codet5_summaries)
+                    if provider:
+                        try:
+                            module_doc, _ = _build_module_doc_agentic(analysis, temp_path, provider)
+                        except Exception:
+                            module_doc = _build_module_doc(analysis, temp_path, provider)
+                    else:
+                        module_doc = _build_module_doc(analysis, temp_path, provider)
                     docs_to_save.append({
                         "doc_type": "module",
                         "module_name": rel_path,
@@ -1184,18 +1261,31 @@ async def create_project_endpoint(
                     "dependency_graph": uml_diagrams.get("dependency", ""),
                     "inheritance_diagram": uml_diagrams.get("inheritance", ""),
                 }
-                overview = _build_project_overview(analyses, temp_path, metrics, uml_for_overview, provider)
+                if provider:
+                    try:
+                        overview, _ = _build_project_overview_agentic(
+                            analyses, temp_path, metrics, uml_for_overview, provider
+                        )
+                    except Exception:
+                        overview = _build_project_overview(analyses, temp_path, metrics, uml_for_overview, provider)
+                else:
+                    overview = _build_project_overview(analyses, temp_path, metrics, uml_for_overview, provider)
                 docs_to_save.append({
                     "doc_type": "overview",
                     "module_name": None,
                     "content": overview,
                 })
 
-                codet5_summaries = _get_codet5_summaries(analyses, temp_path)
                 if include_module_docs:
                     for analysis in analyses:
                         rel_path = str(analysis.path.relative_to(temp_path))
-                        module_doc = _build_module_doc(analysis, temp_path, provider, codet5_summaries)
+                        if provider:
+                            try:
+                                module_doc, _ = _build_module_doc_agentic(analysis, temp_path, provider)
+                            except Exception:
+                                module_doc = _build_module_doc(analysis, temp_path, provider)
+                        else:
+                            module_doc = _build_module_doc(analysis, temp_path, provider)
                         docs_to_save.append({
                             "doc_type": "module",
                             "module_name": rel_path,
@@ -1549,3 +1639,66 @@ async def batch_summarize_endpoint(
 
     model_id = codet5.default_model
     return BatchSummarizeResponse(summaries=summaries, model_used=model_id)
+
+
+# =============================================
+# Agentic Pipeline (Multi-Agent Documentation)
+# =============================================
+
+@router.post("/agent/run", response_model=AgentRunResponse, tags=["Agentic Pipeline"])
+async def agent_run_endpoint(
+    request: AgentRunRequest,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    user: dict = Depends(require_auth),
+):
+    user_id = get_user_id(user)
+    await _check_rate_limit(user_id, "agent-run")
+
+    if not request.files:
+        raise HTTPException(status_code=400, detail="No files provided")
+
+    py_files = [f for f in request.files if f.filename.endswith(".py")]
+    if not py_files:
+        raise HTTPException(status_code=400, detail="No Python files found")
+
+    provider = LLMFactory.get_provider(api_key=x_api_key)
+    if not provider:
+        raise HTTPException(status_code=503, detail="No LLM provider available. Set GROQ_API_KEY or GOOGLE_API_KEY.")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+
+        written_count = 0
+        for file_input in py_files:
+            safe_name = _sanitize_filename(file_input.filename)
+            if not safe_name:
+                continue
+            file_path = temp_path / safe_name
+            file_path.write_text(file_input.content, encoding="utf-8")
+            written_count += 1
+
+        if written_count == 0:
+            raise HTTPException(status_code=400, detail="No valid Python files found after sanitization")
+
+        analyses = analyze_project(temp_path)
+        metrics = get_metrics(analyses)
+
+        uml_diagrams = {
+            "class_diagram": generate_class_diagram(analyses, temp_path),
+            "dependency_graph": generate_dependency_graph(analyses, temp_path),
+            "inheritance_diagram": generate_inheritance_diagram(analyses, temp_path),
+        }
+
+        try:
+            overview, trace = _build_project_overview_agentic(
+                analyses, temp_path, metrics, uml_diagrams, provider
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Agent pipeline failed: {str(e)}")
+
+        await log_usage(user_id, "agent-run", len(py_files))
+
+        return AgentRunResponse(
+            documentation=overview,
+            trace=_trace_to_response(trace),
+        )

@@ -92,6 +92,7 @@ class ProjectDocsResponse(BaseModel):
     module_docs: Dict[str, str] = {}
     uml_diagrams: Dict[str, str] = {}
     metrics: Dict[str, Any] = {}
+    agent_trace: Optional[AgentTraceResponse] = None
 
 
 class HealthResponse(BaseModel):
@@ -132,10 +133,26 @@ class UnifiedAnalysisResponse(BaseModel):
     error: Optional[str] = None
 
 
+class AgentStepResponse(BaseModel):
+    step_number: int
+    agent_name: str
+    role: str
+    input_preview: str = Field(default="", description="First 500 chars of the agent's input prompt")
+    output: str
+    duration_seconds: float
+
+
+class AgentTraceResponse(BaseModel):
+    steps: List[AgentStepResponse] = []
+    total_duration_seconds: float = 0.0
+    final_output: str = ""
+
+
 class DocsTextRequest(BaseModel):
     files: List[CodeFileInput] = Field(..., description="List of Python files with content")
     include_uml: bool = Field(True, description="Include UML diagrams")
     include_module_docs: bool = Field(True, description="Generate per-module docs")
+    use_agents: bool = Field(True, description="Use multi-agent pipeline for doc generation")
 
 
 class UMLTextRequest(BaseModel):
@@ -231,3 +248,12 @@ class BatchSummarizeRequest(BaseModel):
 class BatchSummarizeResponse(BaseModel):
     summaries: Dict[str, str] = Field(default_factory=dict, description="Filename -> summary mapping")
     model_used: str
+
+
+class AgentRunRequest(BaseModel):
+    files: List[CodeFileInput] = Field(..., description="List of Python files with content")
+
+
+class AgentRunResponse(BaseModel):
+    documentation: str
+    trace: AgentTraceResponse

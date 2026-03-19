@@ -12,7 +12,7 @@ from .base import BaseLLMProvider, LLMConfig
 class CodeT5Provider(BaseLLMProvider):
     def __init__(self, api_key: str, config: Optional[LLMConfig] = None):
         self._model_id = os.getenv(
-            "HUGGINGFACE_MODEL_ID", "Salesforce/codet5-small"
+            "HUGGINGFACE_MODEL_ID", "openai/gpt-oss-120b"
         )
         super().__init__(api_key, config)
 
@@ -27,9 +27,11 @@ class CodeT5Provider(BaseLLMProvider):
     def generate(self, prompt: str) -> str:
         code = self._extract_code(prompt)
         input_text = f"summarize python: {code}"
-
-        api_url = f"https://api-inference.huggingface.co/models/{self._model_id}"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        api_url = f"https://router.huggingface.co/hf-inference/models/{self._model_id}"  # ✅ fixed
+        headers = {
+        "Authorization": f"Bearer {self.api_key}",
+        "Content-Type": "application/json",  # ✅ add this too
+    }
         payload = {
             "inputs": input_text,
             "parameters": {
