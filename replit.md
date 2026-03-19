@@ -7,7 +7,9 @@ This is an AI-powered code documentation generator for a Final Year Project (FYP
 - Project-level README with architecture overview
 - **UML diagrams** (Mermaid format) showing class relationships, inheritance, and dependencies
 - **REST API** for integration with web interfaces
-- **Supabase JWT authentication** with rate limiting
+- **Supabase JWT authentication** (mandatory on all routes except health)
+- **Project persistence** — save projects, files, docs, and UML to Supabase
+- **LLM-powered doc editing** — update generated docs via natural language instructions
 
 ## Project Structure
 ```
@@ -15,21 +17,31 @@ code_doc_ai/                     # Main package (at root for Vercel)
 ├── __init__.py
 ├── api/                         # REST API layer
 │   ├── app.py                   # FastAPI application setup
-│   ├── routes.py                # API endpoints
+│   ├── routes.py                # API endpoints (analysis, projects, docs, UML, GitHub)
 │   ├── schemas.py               # Pydantic request/response models
-│   ├── auth.py                  # Supabase JWT authentication
-│   └── usage.py                 # Usage tracking & rate limiting
+│   ├── auth.py                  # Supabase JWT authentication (mandatory)
+│   ├── usage.py                 # Usage tracking & rate limiting
+│   ├── supabase_service.py      # Supabase database CRUD operations
+│   └── github.py                # GitHub API integration
 ├── core/                        # Core analysis logic
 │   ├── models.py                # Data models
 │   ├── parser.py                # AST parser for Python code
 │   └── relationships.py         # Class/file relationship mapping
 ├── generators/                  # Output generators
-│   └── uml.py                   # Mermaid UML diagram generation
+│   ├── uml.py                   # Mermaid UML diagram generation
+│   └── pdf.py                   # PDF documentation export
 ├── llm/                         # LLM provider abstraction
 │   ├── base.py                  # Base LLM provider class
 │   ├── factory.py               # LLM provider factory
-│   ├── groq_provider.py         # Groq/Llama implementation
-│   └── gemini_provider.py       # Google Gemini implementation
+│   ├── groq_provider.py         # Groq/Llama implementation (doc generation)
+│   ├── gemini_provider.py       # Google Gemini implementation (doc editing)
+│   └── codet5_provider.py       # Fine-tuned CodeT5 (code summarization via HF API)
+├── app/                         # Higher-level orchestration
+│   ├── parser.py                # File/project parsing
+│   ├── uml_generator.py         # UML generation logic
+│   ├── docstring_generator.py   # LLM prompt templates
+│   ├── project_docs.py          # Project documentation builder
+│   └── relationship_mapper.py   # Cross-file relationship mapper
 └── utils/
     └── config.py                # YAML config management
 
@@ -38,268 +50,110 @@ api/
 └── requirements.txt             # Dependencies for Vercel
 
 src/
-└── main.py                      # Local development entry point
+└── main.py                      # Local development entry point (uvicorn, port 5000)
+
+migrations/
+├── 001_create_tables.sql        # Supabase database schema
+└── 002_add_filepath.sql         # Adds file_path column to project_files
+
+training/
+├── codet5_training.py           # Google Colab script for fine-tuning CodeT5-small
+└── README_TRAINING.md           # Step-by-step Colab training instructions
 
 test_sample/                     # Sample e-commerce code for testing
+API_DOCS.md                      # Full API reference for frontend team
+DEPLOY.md                        # Vercel deployment instructions
 ```
 
 ## API Endpoints
 
-The server runs on port 5000 and provides these endpoints:
+The server runs on port 5000. All endpoints except `/api/v1/health` require JWT auth.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/` | GET | API info and available endpoints |
-| `/docs` | GET | Interactive Swagger documentation |
-| `/api/v1/health` | GET | Health check with LLM status |
-| `/api/v1/analyze-text` | POST | **Analyze code as JSON text** |
-| `/api/v1/upload-files` | POST | **Upload Python files (multipart)** |
-| `/api/v1/upload-zip` | POST | **Upload ZIP project file** |
-| `/api/v1/docs-text` | POST | **Generate full documentation from code text** |
-| `/api/v1/uml-text` | POST | **Generate UML diagrams from code text** |
+| `/api/v1/health` | GET | Health check (no auth) |
+| `/api/v1/projects` | POST | Create project (upload files, analyze, generate docs+UML) |
+| `/api/v1/projects` | GET | List user's projects |
+| `/api/v1/projects/{id}` | GET | Get project details with files, docs, UML |
+| `/api/v1/projects/{id}` | DELETE | Delete a project |
+| `/api/v1/projects/{id}/export-pdf` | GET | Download project docs as PDF (from saved data) |
+| `/api/v1/docs/update` | POST | Update documentation via LLM (Gemini) |
+| `/api/v1/docs/{doc_id}` | PATCH | Manual doc edit (save directly, no LLM) |
+| `/api/v1/analyze-text` | POST | Analyze code as JSON text |
+| `/api/v1/upload-files` | POST | Upload Python files (multipart) |
+| `/api/v1/upload-zip` | POST | Upload ZIP project |
+| `/api/v1/docs-text` | POST | Generate full docs from code text |
+| `/api/v1/uml-text` | POST | Generate UML from code text |
 | `/api/v1/docstring` | POST | Generate docstring for code snippet |
-| `/api/v1/export-pdf` | POST | **Export documentation as PDF** |
-| `/api/v1/github/repos` | GET | **List user's GitHub repositories** |
-| `/api/v1/github/analyze` | POST | **Analyze GitHub repo code** |
-| `/api/v1/github/export-pdf` | POST | **Generate PDF from GitHub repo** |
+| `/api/v1/export-pdf` | POST | Export documentation as PDF |
+| `/api/v1/summarize` | POST | Summarize code snippet (CodeT5 model) |
+| `/api/v1/summarize/batch` | POST | Batch summarize multiple snippets (CodeT5) |
+| `/api/v1/github/repos` | GET | List GitHub repos |
+| `/api/v1/github/analyze` | POST | Analyze GitHub repo (saves to Supabase by default) |
+| `/api/v1/github/export-pdf` | POST | PDF from GitHub repo |
 
-### Authentication
+## Authentication
 
-The API supports optional Supabase JWT authentication for rate limiting:
-
+All routes (except health) require Supabase JWT:
 ```
-Authorization: Bearer <supabase-jwt-token>
-```
-
-- **Without token**: API works but no usage tracking
-- **With token**: Usage is tracked, rate limits apply (50 generations/day default)
-
-For LLM-based features (docstrings, documentation), provide the LLM API key:
-```
-X-API-Key: <groq-or-gemini-api-key>
+Authorization: Bearer <supabase_jwt_token>
 ```
 
-### Main Endpoints (For Web Frontend Integration)
+## Database Tables (Supabase)
 
-**1. Analyze Text (paste code as JSON):**
-```bash
-curl -X POST https://your-app.vercel.app/api/v1/analyze-text \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <supabase-jwt>" \
-  -H "X-API-Key: <llm-api-key>" \
-  -d '{
-    "files": [
-      {"filename": "main.py", "content": "def hello(): pass"},
-      {"filename": "utils.py", "content": "class Helper: pass"}
-    ],
-    "generate_docs": false
-  }'
-```
+| Table | Purpose |
+|-------|---------|
+| `usage_logs` | API usage tracking and rate limiting |
+| `projects` | User projects (name, description) |
+| `project_files` | Uploaded Python files per project |
+| `generated_docs` | Generated documentation (overview, module, docstring) with versioning |
+| `generated_uml` | Generated UML diagrams (class, dependency, inheritance) |
 
-**2. Upload Files (multipart form):**
-```bash
-curl -X POST https://your-app.vercel.app/api/v1/upload-files \
-  -H "Authorization: Bearer <supabase-jwt>" \
-  -H "X-API-Key: <llm-api-key>" \
-  -F "files=@main.py" \
-  -F "files=@utils.py" \
-  -F "generate_docs=false"
-```
-
-**3. Upload ZIP Project:**
-```bash
-curl -X POST https://your-app.vercel.app/api/v1/upload-zip \
-  -H "Authorization: Bearer <supabase-jwt>" \
-  -H "X-API-Key: <llm-api-key>" \
-  -F "file=@project.zip" \
-  -F "generate_docs=false"
-```
-
-**4. Generate Documentation (from code text):**
-```bash
-curl -X POST https://your-app.vercel.app/api/v1/docs-text \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <supabase-jwt>" \
-  -H "X-API-Key: <llm-api-key>" \
-  -d '{
-    "files": [{"filename": "main.py", "content": "class User: pass"}],
-    "include_uml": true,
-    "include_module_docs": true
-  }'
-```
-
-**5. Generate UML Only (no LLM needed):**
-```bash
-curl -X POST https://your-app.vercel.app/api/v1/uml-text \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <supabase-jwt>" \
-  -d '{
-    "files": [{"filename": "main.py", "content": "class User: pass\nclass Admin(User): pass"}],
-    "include_methods": true,
-    "include_attributes": true
-  }'
-```
-
-### Response Formats
-
-**Unified Analysis Response (analyze-text, upload-files, upload-zip):**
-```json
-{
-  "success": true,
-  "analysis": {
-    "files": [...],
-    "metrics": {"total_files": 3, "total_classes": 5, ...}
-  },
-  "uml": {
-    "class_diagram": "classDiagram...",
-    "dependency_graph": "graph TD...",
-    "inheritance_diagram": "graph BT..."
-  },
-  "relationships": [...],
-  "documentation": null,
-  "error": null
-}
-```
-
-**Documentation Response (docs-text):**
-```json
-{
-  "project_overview": "# Project Overview...",
-  "module_docs": {"main.py": "## main Module..."},
-  "uml_diagrams": {"class_diagram": "classDiagram..."},
-  "metrics": {"total_files": 1, ...}
-}
-```
-
-**UML Response (uml-text):**
-```json
-{
-  "class_diagram": "classDiagram\n    class User {...}",
-  "dependency_graph": "graph TD\n    F0[main]",
-  "inheritance_diagram": "graph BT\n    C0[Admin] --> C1[User]",
-  "class_relationships": [...]
-}
-```
-
-## Key Features
-
-### 1. REST API (FastAPI)
-- Clean RESTful interface for all functionality
-- Swagger/OpenAPI documentation at `/docs`
-- Pydantic validation for requests/responses
-- CORS enabled for web integration
-
-### 2. Authentication & Rate Limiting
-- Supabase JWT token validation
-- Daily rate limits (configurable, default 50/day)
-- Usage tracking per user in Supabase
-
-### 3. LLM Provider Abstraction
-- Pluggable LLM providers (Groq, Gemini)
-- Factory pattern for provider selection
-- API key passed via X-API-Key header
-
-### 4. PDF Export
-- Generate downloadable PDF documentation from code
-- Includes project overview, file analysis, UML diagrams, relationships
-- Professional formatting with title page and metrics
-- Works with uploaded code or GitHub repos
-
-### 5. GitHub Integration
-- List user's GitHub repositories
-- Fetch and analyze repo Python files directly
-- Generate documentation or PDF from any GitHub repo
-- Uses GitHub access token (from Supabase OAuth or personal token)
-
-### 6. Code Analysis
-- Python AST-based parsing (code is never executed)
-- Class/function/method extraction
-- Type hint and docstring detection
-- Import relationship tracking
-
-### 7. UML Generation
-- **Class Diagrams**: Mermaid syntax with visibility markers
-- **Dependency Graphs**: File-level import relationships
-- **Inheritance Diagrams**: Class hierarchy visualization
-- No LLM needed - pure AST parsing
-
-## Running the Server
-
-```bash
-cd src && python main.py
-```
-
-Or use the workflow "API Server" which is configured to run automatically.
+Run migrations in Supabase SQL Editor:
+1. `migrations/001_create_tables.sql` — creates all tables
+2. `migrations/002_add_filepath.sql` — adds `file_path` column to `project_files`
 
 ## Environment Variables
 
-### Required for LLM Features
-- `GROQ_API_KEY` - For Groq/Llama LLM access
-- `GOOGLE_API_KEY` - For Google Gemini LLM access
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GROQ_API_KEY` | Yes* | Groq API key for doc generation |
+| `GOOGLE_API_KEY` | Yes* | Gemini API key for doc editing |
+| `SUPABASE_URL` | Yes | Supabase project URL |
+| `SUPABASE_JWT_SECRET` | Yes | JWT secret for auth |
+| `SUPABASE_SERVICE_KEY` | Yes | Service role key for DB access |
+| `HUGGINGFACE_API_TOKEN` | No | HuggingFace API token for CodeT5 model |
+| `HUGGINGFACE_MODEL_ID` | No | HuggingFace model ID (default: Salesforce/codet5-small) |
+| `DAILY_GENERATION_LIMIT` | No | Rate limit per user (default: 50) |
 
-### Required for Authentication (Optional)
-- `SUPABASE_URL` - Supabase project URL
-- `SUPABASE_JWT_SECRET` - JWT secret for token validation
-- `SUPABASE_SERVICE_KEY` - Service key for usage tracking
-- `DAILY_GENERATION_LIMIT` - Rate limit per user (default: 50)
+*At least one LLM key needed for AI features. HuggingFace token enables the fine-tuned CodeT5 summarization model.
 
-## Supabase Setup
+## Key Architecture Decisions
+- **Hybrid AI Pipeline**: Fine-tuned CodeT5 generates per-function/class summaries → summaries fed as context to LLM → LLM writes full project/module documentation
+- **Groq** (Llama 3.3 70B) for initial documentation generation (fast, good quality)
+- **Gemini** (1.5 Flash) for documentation editing/updates (good at following instructions)
+- **CodeT5-small** (fine-tuned on CodeSearchNet Python) for code summarization — runs via HuggingFace Inference API (no local GPU needed)
+- **Supabase** for auth, database, and usage tracking
+- **Mermaid.js** for UML — frontend renders using `mermaid` npm package
+- **Dual deployment**: Local dev (uvicorn) + Vercel serverless (same codebase)
 
-1. Create a Supabase project
-2. Create the usage_logs table:
-```sql
-CREATE TABLE usage_logs (
-  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  endpoint TEXT NOT NULL,
-  files_count INTEGER DEFAULT 0,
-  success BOOLEAN DEFAULT true,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX idx_usage_logs_user_date ON usage_logs(user_id, created_at);
-```
-
-3. Add environment variables to Vercel
+## Hybrid Documentation Pipeline
+1. User uploads Python code (files, ZIP, or GitHub repo)
+2. AST parser extracts classes, functions, imports, and metrics
+3. If CodeT5 is configured: each function/class is sent to the fine-tuned model for a one-line summary
+4. LLM (Groq/Gemini) receives the code outline + CodeT5 summaries as context → generates full module documentation
+5. LLM generates project overview combining all module analyses
+6. UML diagrams generated from AST data (no LLM needed)
+7. Everything saved to Supabase for persistence and later editing
 
 ## Dependencies
-- fastapi
-- uvicorn
-- langchain-core
-- langchain-groq
-- langchain-google-genai
-- pyyaml
-- python-dotenv
-- PyJWT
-- httpx
+- fastapi, uvicorn
+- langchain-core, langchain-groq, langchain-google-genai
+- PyJWT, httpx, requests
+- fpdf2, pyyaml, python-dotenv, python-multipart
 
-## Web Integration
+## Development Note
+The API Server workflow on Replit should only be started during active development/testing. Stop it when not in use to avoid consuming Replit credits. For production, deploy to Vercel (serverless, free tier).
 
-Your teammates can integrate with this API:
-
-1. **Frontend**: Use Supabase Auth for user login
-2. **API calls**: Pass JWT token in Authorization header
-3. **LLM features**: Pass LLM API key in X-API-Key header
-4. **Documentation**: Access Swagger docs at `/docs`
-
-## Vercel Deployment
-See `DEPLOY.md` for full instructions. Quick summary:
-1. Push to GitHub (production-ai-backend branch)
-2. Create project on vercel.com
-3. Import repo (auto-detects `vercel.json`)
-4. Add environment variables in Vercel Settings
-
-## Recent Changes (January 2026)
-- Added `/api/v1/docs-text` - Generate documentation from code text
-- Added `/api/v1/uml-text` - Generate UML from code text
-- Added Supabase JWT authentication support
-- Added usage tracking and rate limiting
-- Removed Mangum wrapper for native Vercel ASGI support
-- All endpoints now accept uploaded code instead of server paths
-
-## User Preferences
-- Google-style docstrings
-- Mermaid format for UML diagrams
-- Support for both Groq and Google Gemini APIs
-- REST API for web interface integration
-- Supabase for authentication and usage tracking
+## Deployment
+See `DEPLOY.md` for Vercel deployment. See `API_DOCS.md` for full API reference.

@@ -6,12 +6,14 @@ from typing import Optional
 from .base import BaseLLMProvider, LLMConfig
 from .groq_provider import GroqProvider
 from .gemini_provider import GeminiProvider
+from .codet5_provider import CodeT5Provider
 
 
 class LLMFactory:
     _providers = {
         "groq": GroqProvider,
         "gemini": GeminiProvider,
+        "codet5": CodeT5Provider,
     }
     
     @classmethod
@@ -46,9 +48,27 @@ class LLMFactory:
         return None
     
     @classmethod
+    def get_codet5(cls) -> Optional[CodeT5Provider]:
+        hf_token = os.getenv("HUGGINGFACE_API_TOKEN")
+        if not hf_token:
+            return None
+        return CodeT5Provider(hf_token)
+
+    @classmethod
     def is_available(cls) -> bool:
         return bool(os.getenv("GROQ_API_KEY") or os.getenv("GOOGLE_API_KEY"))
-    
+
+    @classmethod
+    def is_codet5_available(cls) -> bool:
+        return bool(os.getenv("HUGGINGFACE_API_TOKEN"))
+
     @classmethod
     def list_providers(cls) -> list[str]:
-        return list(cls._providers.keys())
+        available = []
+        if os.getenv("GROQ_API_KEY"):
+            available.append("groq")
+        if os.getenv("GOOGLE_API_KEY"):
+            available.append("gemini")
+        if os.getenv("HUGGINGFACE_API_TOKEN"):
+            available.append("codet5")
+        return available

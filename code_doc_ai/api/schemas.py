@@ -160,3 +160,74 @@ class GitHubRepoRequest(BaseModel):
     include_uml: bool = Field(True, description="Include UML diagrams")
     export_pdf: bool = Field(False, description="Return PDF instead of JSON")
     project_name: Optional[str] = Field(None, description="Name for documentation (defaults to repo name)")
+    save_to_project: bool = Field(True, description="Save results to Supabase as a project")
+    include_module_docs: bool = Field(True, description="Generate per-module docs (when save_to_project and generate_docs are true)")
+
+
+class CreateProjectRequest(BaseModel):
+    name: str = Field(..., description="Project name")
+    description: str = Field("", description="Project description")
+    generate_docs: bool = Field(True, description="Generate AI documentation")
+    include_uml: bool = Field(True, description="Include UML diagrams")
+    include_module_docs: bool = Field(True, description="Generate per-module docs")
+
+
+class ProjectSummaryResponse(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    created_at: str
+    updated_at: str
+
+
+class ProjectDetailResponse(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    created_at: str
+    updated_at: str
+    files: List[Dict[str, Any]] = []
+    docs: List[Dict[str, Any]] = []
+    uml: List[Dict[str, Any]] = []
+    analysis: Optional[Dict[str, Any]] = None
+    relationships: List[RelationshipResponse] = []
+
+
+class DocUpdateRequest(BaseModel):
+    doc_id: str = Field(..., description="UUID of the generated doc to update")
+    instruction: str = Field(..., description="User instruction for how to update the documentation")
+
+
+class DocUpdateResponse(BaseModel):
+    id: str
+    content: str
+    version: int
+    provider_used: Optional[str] = None
+
+
+class ManualDocUpdateRequest(BaseModel):
+    content: str = Field(..., description="Updated documentation content (Markdown)")
+
+
+class ManualDocUpdateResponse(BaseModel):
+    id: str
+    content: str
+    version: int
+
+
+class SummarizeRequest(BaseModel):
+    code: str = Field(..., description="Python code to summarize")
+
+
+class SummarizeResponse(BaseModel):
+    summary: str
+    model_used: str
+
+
+class BatchSummarizeRequest(BaseModel):
+    snippets: List[CodeFileInput] = Field(..., description="List of code snippets to summarize")
+
+
+class BatchSummarizeResponse(BaseModel):
+    summaries: Dict[str, str] = Field(default_factory=dict, description="Filename -> summary mapping")
+    model_used: str

@@ -9,3 +9,14 @@ uvicorn>=0.40.0
 PyJWT>=2.8.0
 httpx>=0.28.0
 fpdf2>=2.8.0
+fastapi
+fpdf2
+httpx
+langchain-core
+langchain-google-genai
+langchain-groq
+PyJWT
+python-dotenv
+python-multipart
+pyyaml
+uvicorn
